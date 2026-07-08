@@ -2,7 +2,7 @@
 // Created by Omar Atme on 08/07/2026.
 //
 
-#include <cmath>
+
 #include <unistd.h>
 
 void* smalloc(size_t size) {
