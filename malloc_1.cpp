@@ -3,7 +3,7 @@
 //
 
 
-#include <unistd.h>
+#include "os_malloc.h"
 
 void* smalloc(size_t size) {
     if (size == 0 || size > 100000000) {

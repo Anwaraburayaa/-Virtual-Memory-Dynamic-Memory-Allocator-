@@ -1,4 +1,5 @@
 #include <unistd.h>
+#include <cstring>
 #ifndef MALLOCS_SMALLOC_H
 #define MALLOCS_SMALLOC_H
 
