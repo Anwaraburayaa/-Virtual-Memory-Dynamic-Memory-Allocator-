@@ -1,8 +1,14 @@
-#include <unistd.h>
-#include <cstring>
+
+
 #ifndef MALLOCS_SMALLOC_H
 #define MALLOCS_SMALLOC_H
 
+
+
+#include <unistd.h>
+#include <cstring>
+#include <cstdint>
+#include <sys/mman.h>
 
 
 void* smalloc(size_t size);
