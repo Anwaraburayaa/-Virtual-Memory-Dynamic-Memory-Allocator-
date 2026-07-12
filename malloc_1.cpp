@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cstdint>
 #include <sys/mman.h>
+void* smalloc(size_t size);
 
 void* smalloc(size_t size) {
     if (size == 0 || size > 100000000) {
