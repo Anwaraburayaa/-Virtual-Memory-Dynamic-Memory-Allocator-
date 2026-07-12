@@ -282,7 +282,7 @@ void* scalloc(size_t num, size_t size) {
 
 
 
-///TODO: implement this function for Anwaar
+///TODO for Anwaar: implement this function
 void sfree(void* p) {
     if (p == NULL) { return; }
 
@@ -361,7 +361,7 @@ void sfree(void* p) {
     }
 }
 
-///TODO: implement this function for Anwaar
+///TODO for Anwaar: implement this function
 /*thid func takes a ptr to a block and a new size and we have to resize it to the new one
 */
 void* srealloc(void* oldp, size_t size) {
@@ -530,7 +530,7 @@ size_t _num_allocated_blocks() {
     return num_blocks + num_mmap_blocks;
 }
 
-///TODO: implement this function for Anwaar
+///TODO for Anwaar: implement this function
 size_t _num_allocated_bytes() {
     size_t total_heap_memory = NUM_INITIAL_BLOCKS * MAX_BLOCK_SIZE;
     size_t total_metadata_bytes = num_blocks * _size_meta_data();
