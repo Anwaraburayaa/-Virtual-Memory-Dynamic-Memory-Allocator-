@@ -2,8 +2,10 @@
 // Created by Omar Atme on 08/07/2026.
 //
 
-
-#include "os_malloc.h"
+#include <unistd.h>
+#include <cstring>
+#include <cstdint>
+#include <sys/mman.h>
 
 struct MallocMetadata {
     size_t size;

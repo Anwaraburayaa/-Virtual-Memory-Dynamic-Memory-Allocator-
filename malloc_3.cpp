@@ -8,7 +8,10 @@
 #define NUM_INITIAL_BLOCKS 32
 #define ALLOCATION_SIZE (NUM_INITIAL_BLOCKS * MAX_BLOCK_SIZE)
 
-#include "os_malloc.h"
+#include <unistd.h>
+#include <cstring>
+#include <cstdint>
+#include <sys/mman.h>
 
 struct MallocMetadata {
     size_t size;
