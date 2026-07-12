@@ -1,1 +1,544 @@
-//// Created by anwar on 7/12/2026.//#define MAX_ORDER 10#define MAX_BLOCK_SIZE (128 *1024)#define NUM_INITIAL_BLOCKS 32#define ALLOCATION_SIZE (NUM_INITIAL_BLOCKS * MAX_BLOCK_SIZE)#define HUGE_THRESHOLD (1024 * 1024 * 4)#define SCALLOC_THRESHOLD (1024 * 1024 * 2)#include "os_malloc.h"struct MallocMetadata {    size_t size;    bool is_free;    bool is_huge;    MallocMetadata* next;    MallocMetadata* prev;};static MallocMetadata* free_blocks[MAX_ORDER + 1];static MallocMetadata* mmap_blocks = NULL;static bool is_initialized = false;static size_t num_blocks = 0;static size_t num_mmap_blocks = 0;bool initialize_metadata() {    for (size_t i = 0; i <= MAX_ORDER; i++) {        free_blocks[i] = NULL;    }    void* curr_break = sbrk(0);    uintptr_t curr_addr = (uintptr_t)curr_break;    size_t offset = curr_addr % ALLOCATION_SIZE;    if (offset != 0) {        offset = ALLOCATION_SIZE - offset;        void* res = sbrk(offset);        if (res == (void*)(-1)) {            return false;        }    }    void* memory_list = sbrk(ALLOCATION_SIZE);    if (memory_list == (void*)(-1)){        return false;    }    MallocMetadata* prev = NULL;    MallocMetadata* curr = (MallocMetadata*)memory_list;    for (size_t i = 0; i < NUM_INITIAL_BLOCKS; i++) {        curr->size = MAX_BLOCK_SIZE;        curr->is_free = true;        curr->next = NULL;        curr->prev = prev;        if (prev != NULL) {            prev->next = curr;        }        prev = curr;        curr = (MallocMetadata*)((char*)curr + MAX_BLOCK_SIZE);    }    free_blocks[MAX_ORDER] = (MallocMetadata*)memory_list;    is_initialized = true;    num_blocks = 32;    return true;}void insertToListByAddress(MallocMetadata* block, int order) {    MallocMetadata* curr = free_blocks[order];    //The list is empty    if (curr == NULL) {        block->next = NULL;        block->prev = NULL;        free_blocks[order] = block;        return;    }    //Addition at the head    if ((uintptr_t)block < (uintptr_t)curr) {        block->next = curr;        block->prev = NULL;        curr->prev = block;        free_blocks[order] = block;        return;    }    //We need to walk through the list to find the correct spot    while (curr->next != NULL && (uintptr_t)curr->next < (uintptr_t)block) {        curr = curr->next;    }    block->next = curr->next;    block->prev = curr;    if (curr->next != NULL) {        curr->next->prev = block;    }    curr->next = block;}void* smalloc(size_t size) {    if (is_initialized == false) {        if (!initialize_metadata()) {            return NULL;        }    }    if (size == 0 || size > 100000000) {        return NULL;    }    size_t total_size = size + _size_meta_data();    ///check if we are in huge alloc case    if(size >= HUGE_THRESHOLD){        void* res = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);        if (res == MAP_FAILED) {            return NULL;        }        MallocMetadata* ptr = (MallocMetadata*)res;        ptr->size = total_size;        ptr->is_free = false;        ptr->is_huge = true;        ptr->prev = NULL;        ptr->next = mmap_blocks;        if (mmap_blocks != NULL) {            mmap_blocks->prev = ptr;        }        mmap_blocks = ptr;        num_mmap_blocks++;        return (void*)(ptr + 1);    }    if (total_size > MAX_BLOCK_SIZE) {        void* res = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);        if (res == MAP_FAILED) {            return NULL;        }        MallocMetadata* ptr = (MallocMetadata*)res;        ptr->size = total_size;        ptr->is_free = false;        ptr->is_huge = false;        ptr->prev = NULL;        ptr->next = mmap_blocks;        if (mmap_blocks != NULL) {            mmap_blocks->prev = ptr;        }        mmap_blocks = ptr;        num_mmap_blocks++;        return (void*)(ptr + 1);    }    int order_wanted = 0;    size_t current_size = 128;    //we find the order of the minimal size that is bigger than the total size    while (current_size < total_size && order_wanted <= MAX_ORDER) {        order_wanted++;        current_size *= 2;    }    if (order_wanted > MAX_ORDER) {        return NULL;    }    int order_found = order_wanted;    //although we found the right order, the list at this order might be empty, so we search in bigger orders until we    //find a non-empty list    while (order_found <= MAX_ORDER && free_blocks[order_found] == NULL) {        order_found++;    }    //if the condition is true, the heap is full    if (order_found > MAX_ORDER) {        return NULL;    }    MallocMetadata* target_block = free_blocks[order_found];    free_blocks[order_found] = target_block->next;    if (free_blocks[order_found] != NULL) {        free_blocks[order_found]->prev = NULL;    }    target_block->next = NULL;    target_block->prev = NULL;    while (order_found > order_wanted) {        target_block->size = target_block->size / 2;        size_t new_size = target_block->size;        MallocMetadata* right_block = (MallocMetadata*)((char*)target_block + new_size);        right_block->size = new_size;        right_block->is_free = true;        int lower_order = order_found - 1;        insertToListByAddress(right_block, lower_order);        num_blocks++;        order_found--;    }    target_block->is_free = false;    target_block->is_huge = false;    return (void*)(target_block + 1);}void* scalloc(size_t num, size_t size) {    if(size > SCALLOC_THRESHOLD){        size_t total_size = num * size + _size_meta_data();        void* res = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);        if (res == MAP_FAILED) {            return NULL;        }        MallocMetadata* ptr = (MallocMetadata*)res;        ptr->size = total_size;        ptr->is_free = false;        ptr->is_huge = true;        ptr->prev = NULL;        ptr->next = mmap_blocks;        if (mmap_blocks != NULL) {            mmap_blocks->prev = ptr;        }        mmap_blocks = ptr;        num_mmap_blocks++;        std::memset((void*)(ptr + 1), 0, num * size);        return (void*)(ptr + 1);    }    void* allocated = smalloc(size * num);    if (allocated == NULL) {        return NULL;    }    std::memset(allocated, 0, size * num);    return allocated;}///TODO: implement this function for Anwaarvoid sfree(void* p) {    if (p == NULL) { return; }    MallocMetadata* ptr = (MallocMetadata*)p;    ptr--;    if (ptr->is_free == true) { return; }    /// Handle mmap blocks    if (ptr->size > MAX_BLOCK_SIZE) {        MallocMetadata* curr = mmap_blocks;        while (curr != NULL) {            if (curr == ptr) {                if (curr->prev != NULL) {                    curr->prev->next = curr->next;                } else {                    mmap_blocks = curr->next;                }                if (curr->next != NULL) {                    curr->next->prev = curr->prev;                }                munmap(curr, curr->size);                num_mmap_blocks--;                return;            }            curr = curr->next;        }        return;    }    /// If block is not mmap    else {        ptr->is_free = true;        int curr_order = 0;        size_t curr_size = 128;        while (curr_size < ptr->size) {            curr_order++;            curr_size *= 2;        }        while (curr_order < MAX_ORDER) {            uintptr_t buddy_addr = (uintptr_t)ptr ^ ptr->size;            MallocMetadata* buddy_ptr = (MallocMetadata*)buddy_addr;            /// Check if we can merge them            if (buddy_ptr->is_free == true && buddy_ptr->size == ptr->size) {                /// Remove buddy_ptr from the list of free blocks                if (buddy_ptr->prev != NULL) {                    buddy_ptr->prev->next = buddy_ptr->next;                } else {                    free_blocks[curr_order] = buddy_ptr->next;                }                if (buddy_ptr->next != NULL) {                    buddy_ptr->next->prev = buddy_ptr->prev;                }                /// Update ptr to the minimal address of the two                if ((uintptr_t)buddy_ptr < (uintptr_t)ptr) {                    ptr = buddy_ptr;                }                ptr->size *= 2;                curr_order++;                num_blocks--;            }            else {                break;            }        }        insertToListByAddress(ptr, curr_order);    }}///TODO: implement this function for Anwaar/*thid func takes a ptr to a block and a new size and we have to resize it to the new one*/void* srealloc(void* oldp, size_t size) {///we have to check if the new size is smaller then we have we do nothing also check if null or the new size is legal    if (size == 0 || size > 100000000) {        return NULL;    }    if (oldp == NULL) {        return smalloc(size);    }MallocMetadata* old_metadata = (MallocMetadata*)oldp;    old_metadata--;  ///we have to sub metadata size    if (size <= old_metadata->size - _size_meta_data()) {        return oldp;    }   ///we check if new alloc is bif so we do mmap    if(old_metadata->size > MAX_BLOCK_SIZE){      void* res;        if (old_metadata->is_huge) {            res = mmap(NULL, size + _size_meta_data(), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);        } else {            res = mmap(NULL, size + _size_meta_data(), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);        }        if (res == MAP_FAILED) {            return NULL;        }    MallocMetadata* ptr = (MallocMetadata*)res;    ptr->size = size + _size_meta_data();    ptr->is_free = false;    ptr->is_huge = old_metadata->is_huge;    ptr->prev = NULL;    ptr->next = mmap_blocks;    if (mmap_blocks != NULL) {        mmap_blocks->prev = ptr;    }    mmap_blocks = ptr;    num_mmap_blocks++;    std::memmove((void*)(ptr + 1), oldp, old_metadata->size - _size_meta_data());    sfree(oldp);    return (void*)(ptr + 1);}///buddy caseelse {    size_t needed = size + _size_meta_data();    ///find current order of the block    int current_order = 0;    size_t current_size = 128;    while (current_size < old_metadata->size) {        current_size *= 2;        current_order++;    }    ///we wanna check if we can resize the curren block by merging buddys    uintptr_t test_addr = (uintptr_t)old_metadata;    size_t test_size = old_metadata->size;    int test_order = current_order;    while (test_order < MAX_ORDER && test_size < needed) {        uintptr_t buddy_addr = test_addr ^ test_size;        MallocMetadata* buddy_ptr = (MallocMetadata*)buddy_addr;        if (buddy_ptr->is_free == false || buddy_ptr->size != test_size) {            break;        }        test_addr = (test_addr < buddy_addr) ? test_addr : buddy_addr;        test_size = test_size * 2;        test_order++;    }    ///if test_size is bigger than new size we can merge and resize the block    if (test_size >= needed) {        uintptr_t real_addr = (uintptr_t)old_metadata;        size_t real_size = old_metadata->size;        int real_order = current_order;        while (real_size < needed) {            uintptr_t buddy_addr = real_addr ^ real_size;            MallocMetadata* buddy_ptr = (MallocMetadata*)buddy_addr;            ///we have to remove the buddy from the free list            if (buddy_ptr->prev != NULL) {                buddy_ptr->prev->next = buddy_ptr->next;            } else {                free_blocks[real_order] = buddy_ptr->next;            }            if (buddy_ptr->next != NULL) {                buddy_ptr->next->prev = buddy_ptr->prev;            }            real_addr = (real_addr < buddy_addr) ? real_addr : buddy_addr;            real_size = real_size * 2;            real_order++;            num_blocks--;        }        MallocMetadata* new_header = (MallocMetadata*)real_addr;        ///if the merged block's header ended up at a lower address than the        ///original old_metadata, the payload's position moved too        if (real_addr != (uintptr_t)old_metadata) {            std::memmove((void*)(new_header + 1), oldp, old_metadata->size - _size_meta_data());        }        new_header->size = real_size;        new_header->is_free = false;        return (void*)(new_header + 1);    }    ///if test failed and we couldnt merge the block with its buddies we have to allocate a new block and copy the data    void* newp = smalloc(size);    if (newp == NULL) {        return NULL;    }    std::memmove(newp, oldp, old_metadata->size - _size_meta_data());    sfree(oldp);    return newp;}}size_t _num_free_blocks() {    size_t count = 0;    for (int i = 0; i <= MAX_ORDER; i++) {        MallocMetadata* curr = free_blocks[i];        while (curr != NULL) {            count++;            curr = curr->next;        }    }    return count;}size_t _num_free_bytes() {    size_t total_bytes = 0;    for (int i = 0; i <= MAX_ORDER; i++) {        MallocMetadata* curr = free_blocks[i];        while (curr != NULL) {            total_bytes += (curr->size - _size_meta_data());            curr = curr->next;        }    }    return total_bytes;}size_t _num_allocated_blocks() {    return num_blocks + num_mmap_blocks;}///TODO: implement this function for Anwaarsize_t _num_allocated_bytes() {    size_t total_heap_memory = NUM_INITIAL_BLOCKS * MAX_BLOCK_SIZE;    size_t total_metadata_bytes = num_blocks * _size_meta_data();    size_t buddy_allocated_bytes = total_heap_memory - total_metadata_bytes;    size_t mmap_allocated_bytes = 0;    MallocMetadata* curr = mmap_blocks;    while (curr != NULL) {        mmap_allocated_bytes += (curr->size - _size_meta_data());        curr = curr->next;    }    return buddy_allocated_bytes + mmap_allocated_bytes;}size_t _num_meta_data_bytes() {    return _num_allocated_blocks() * _size_meta_data();}size_t _size_meta_data() {    return sizeof(MallocMetadata);}
+//
+// Created by anwar on 7/12/2026.
+//
+
+
+
+#define MAX_ORDER 10
+#define MAX_BLOCK_SIZE (128 *1024)
+#define NUM_INITIAL_BLOCKS 32
+#define ALLOCATION_SIZE (NUM_INITIAL_BLOCKS * MAX_BLOCK_SIZE)
+#define HUGE_THRESHOLD (1024 * 1024 * 4)
+#define SCALLOC_THRESHOLD (1024 * 1024 * 2)
+
+#include "os_malloc.h"
+
+struct MallocMetadata {
+    size_t size;
+    bool is_free;
+    bool is_huge;
+
+
+    MallocMetadata* next;
+    MallocMetadata* prev;
+};
+
+
+static MallocMetadata* free_blocks[MAX_ORDER + 1];
+static MallocMetadata* mmap_blocks = NULL;
+static bool is_initialized = false;
+
+static size_t num_blocks = 0;
+static size_t num_mmap_blocks = 0;
+
+
+
+
+bool initialize_metadata() {
+    for (size_t i = 0; i <= MAX_ORDER; i++) {
+        free_blocks[i] = NULL;
+    }
+
+    void* curr_break = sbrk(0);
+    uintptr_t curr_addr = (uintptr_t)curr_break;
+
+
+    size_t offset = curr_addr % ALLOCATION_SIZE;
+
+    if (offset != 0) {
+        offset = ALLOCATION_SIZE - offset;
+        void* res = sbrk(offset);
+        if (res == (void*)(-1)) {
+            return false;
+        }
+    }
+
+
+    void* memory_list = sbrk(ALLOCATION_SIZE);
+    if (memory_list == (void*)(-1)){
+        return false;
+    }
+
+    MallocMetadata* prev = NULL;
+    MallocMetadata* curr = (MallocMetadata*)memory_list;
+
+    for (size_t i = 0; i < NUM_INITIAL_BLOCKS; i++) {
+        curr->size = MAX_BLOCK_SIZE;
+        curr->is_free = true;
+        curr->next = NULL;
+        curr->prev = prev;
+
+        if (prev != NULL) {
+            prev->next = curr;
+        }
+
+        prev = curr;
+        curr = (MallocMetadata*)((char*)curr + MAX_BLOCK_SIZE);
+    }
+
+    free_blocks[MAX_ORDER] = (MallocMetadata*)memory_list;
+    is_initialized = true;
+    num_blocks = 32;
+    return true;
+}
+
+
+void insertToListByAddress(MallocMetadata* block, int order) {
+    MallocMetadata* curr = free_blocks[order];
+
+    //The list is empty
+    if (curr == NULL) {
+        block->next = NULL;
+        block->prev = NULL;
+        free_blocks[order] = block;
+        return;
+    }
+
+    //Addition at the head
+    if ((uintptr_t)block < (uintptr_t)curr) {
+        block->next = curr;
+        block->prev = NULL;
+        curr->prev = block;
+        free_blocks[order] = block;
+        return;
+    }
+
+    //We need to walk through the list to find the correct spot
+    while (curr->next != NULL && (uintptr_t)curr->next < (uintptr_t)block) {
+        curr = curr->next;
+    }
+
+    block->next = curr->next;
+    block->prev = curr;
+
+    if (curr->next != NULL) {
+        curr->next->prev = block;
+    }
+    curr->next = block;
+}
+
+
+void* smalloc(size_t size) {
+    if (is_initialized == false) {
+        if (!initialize_metadata()) {
+            return NULL;
+        }
+    }
+
+    if (size == 0 || size > 100000000) {
+        return NULL;
+    }
+
+    size_t total_size = size + _size_meta_data();
+
+    ///check if we are in huge alloc case
+    if(size >= HUGE_THRESHOLD){
+        void* res = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+        if (res == MAP_FAILED) {
+            return NULL;
+        }
+        MallocMetadata* ptr = (MallocMetadata*)res;
+        ptr->size = total_size;
+        ptr->is_free = false;
+        ptr->is_huge = true;
+        ptr->prev = NULL;
+        ptr->next = mmap_blocks;
+        if (mmap_blocks != NULL) {
+            mmap_blocks->prev = ptr;
+        }
+        mmap_blocks = ptr;
+        num_mmap_blocks++;
+        return (void*)(ptr + 1);
+    }
+
+    if (total_size > MAX_BLOCK_SIZE) {
+        void* res = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (res == MAP_FAILED) {
+            return NULL;
+        }
+        MallocMetadata* ptr = (MallocMetadata*)res;
+        ptr->size = total_size;
+        ptr->is_free = false;
+        ptr->is_huge = false;
+        ptr->prev = NULL;
+        ptr->next = mmap_blocks;
+
+        if (mmap_blocks != NULL) {
+            mmap_blocks->prev = ptr;
+        }
+
+        mmap_blocks = ptr;
+        num_mmap_blocks++;
+        return (void*)(ptr + 1);
+    }
+
+
+
+    int order_wanted = 0;
+    size_t current_size = 128;
+
+
+    //we find the order of the minimal size that is bigger than the total size
+    while (current_size < total_size && order_wanted <= MAX_ORDER) {
+        order_wanted++;
+        current_size *= 2;
+    }
+
+    if (order_wanted > MAX_ORDER) {
+        return NULL;
+    }
+
+    int order_found = order_wanted;
+
+    //although we found the right order, the list at this order might be empty, so we search in bigger orders until we
+    //find a non-empty list
+    while (order_found <= MAX_ORDER && free_blocks[order_found] == NULL) {
+        order_found++;
+    }
+
+
+    //if the condition is true, the heap is full
+    if (order_found > MAX_ORDER) {
+        return NULL;
+    }
+
+
+    MallocMetadata* target_block = free_blocks[order_found];
+    free_blocks[order_found] = target_block->next;
+
+    if (free_blocks[order_found] != NULL) {
+        free_blocks[order_found]->prev = NULL;
+    }
+
+    target_block->next = NULL;
+    target_block->prev = NULL;
+
+
+    while (order_found > order_wanted) {
+        target_block->size = target_block->size / 2;
+        size_t new_size = target_block->size;
+
+        MallocMetadata* right_block = (MallocMetadata*)((char*)target_block + new_size);
+        right_block->size = new_size;
+        right_block->is_free = true;
+
+        int lower_order = order_found - 1;
+        insertToListByAddress(right_block, lower_order);
+
+        num_blocks++;
+        order_found--;
+    }
+
+    target_block->is_free = false;
+    target_block->is_huge = false;
+
+    return (void*)(target_block + 1);
+
+}
+
+
+void* scalloc(size_t num, size_t size) {
+    if(size > SCALLOC_THRESHOLD){
+        size_t total_size = num * size + _size_meta_data();
+        void* res = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+        if (res == MAP_FAILED) {
+            return NULL;
+        }
+        MallocMetadata* ptr = (MallocMetadata*)res;
+        ptr->size = total_size;
+        ptr->is_free = false;
+        ptr->is_huge = true;
+        ptr->prev = NULL;
+        ptr->next = mmap_blocks;
+        if (mmap_blocks != NULL) {
+            mmap_blocks->prev = ptr;
+        }
+        mmap_blocks = ptr;
+        num_mmap_blocks++;
+        std::memset((void*)(ptr + 1), 0, num * size);
+        return (void*)(ptr + 1);
+    }
+    void* allocated = smalloc(size * num);
+    if (allocated == NULL) {
+        return NULL;
+    }
+
+    std::memset(allocated, 0, size * num);
+    return allocated;
+}
+
+
+
+///TODO: implement this function for Anwaar
+void sfree(void* p) {
+    if (p == NULL) { return; }
+
+    MallocMetadata* ptr = (MallocMetadata*)p;
+    ptr--;
+
+    if (ptr->is_free == true) { return; }
+
+    /// Handle mmap blocks
+    if (ptr->size > MAX_BLOCK_SIZE) {
+        MallocMetadata* curr = mmap_blocks;
+        while (curr != NULL) {
+            if (curr == ptr) {
+                if (curr->prev != NULL) {
+                    curr->prev->next = curr->next;
+                } else {
+                    mmap_blocks = curr->next;
+                }
+                if (curr->next != NULL) {
+                    curr->next->prev = curr->prev;
+                }
+                munmap(curr, curr->size);
+                num_mmap_blocks--;
+                return;
+            }
+            curr = curr->next;
+        }
+        return;
+    }
+
+    /// If block is not mmap
+    else {
+        ptr->is_free = true;
+        int curr_order = 0;
+        size_t curr_size = 128;
+
+        while (curr_size < ptr->size) {
+            curr_order++;
+            curr_size *= 2;
+        }
+
+        while (curr_order < MAX_ORDER) {
+
+            uintptr_t buddy_addr = (uintptr_t)ptr ^ ptr->size;
+            MallocMetadata* buddy_ptr = (MallocMetadata*)buddy_addr;
+
+            /// Check if we can merge them
+            if (buddy_ptr->is_free == true && buddy_ptr->size == ptr->size) {
+
+                /// Remove buddy_ptr from the list of free blocks
+                if (buddy_ptr->prev != NULL) {
+                    buddy_ptr->prev->next = buddy_ptr->next;
+                } else {
+                    free_blocks[curr_order] = buddy_ptr->next;
+                }
+
+                if (buddy_ptr->next != NULL) {
+                    buddy_ptr->next->prev = buddy_ptr->prev;
+                }
+
+                /// Update ptr to the minimal address of the two
+                if ((uintptr_t)buddy_ptr < (uintptr_t)ptr) {
+                    ptr = buddy_ptr;
+                }
+
+                ptr->size *= 2;
+                curr_order++;
+                num_blocks--;
+            }
+            else {
+                break;
+            }
+        }
+
+        insertToListByAddress(ptr, curr_order);
+    }
+}
+
+///TODO: implement this function for Anwaar
+/*thid func takes a ptr to a block and a new size and we have to resize it to the new one
+*/
+void* srealloc(void* oldp, size_t size) {
+///we have to check if the new size is smaller then we have we do nothing also check if null or the new size is legal
+    if (size == 0 || size > 100000000) {
+        return NULL;
+    }
+
+    if (oldp == NULL) {
+        return smalloc(size);
+    }
+MallocMetadata* old_metadata = (MallocMetadata*)oldp;
+    old_metadata--;
+
+  ///we have to sub metadata size
+    if (size <= old_metadata->size - _size_meta_data()) {
+        return oldp;
+    }
+
+
+   ///we check if new alloc is bif so we do mmap
+    if(old_metadata->size > MAX_BLOCK_SIZE){
+      void* res;
+
+        if (old_metadata->is_huge) {
+            res = mmap(NULL, size + _size_meta_data(), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+        } else {
+            res = mmap(NULL, size + _size_meta_data(), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        }
+        if (res == MAP_FAILED) {
+            return NULL;
+        }
+
+    MallocMetadata* ptr = (MallocMetadata*)res;
+    ptr->size = size + _size_meta_data();
+    ptr->is_free = false;
+    ptr->is_huge = old_metadata->is_huge;
+    ptr->prev = NULL;
+    ptr->next = mmap_blocks;
+
+    if (mmap_blocks != NULL) {
+        mmap_blocks->prev = ptr;
+    }
+
+    mmap_blocks = ptr;
+    num_mmap_blocks++;
+
+    std::memmove((void*)(ptr + 1), oldp, old_metadata->size - _size_meta_data());
+    sfree(oldp);
+    return (void*)(ptr + 1);
+
+
+}
+///buddy case
+else {
+    size_t needed = size + _size_meta_data();
+
+    ///find current order of the block
+    int current_order = 0;
+    size_t current_size = 128;
+    while (current_size < old_metadata->size) {
+        current_size *= 2;
+        current_order++;
+    }
+
+    ///we wanna check if we can resize the curren block by merging buddys
+    uintptr_t test_addr = (uintptr_t)old_metadata;
+    size_t test_size = old_metadata->size;
+    int test_order = current_order;
+
+    while (test_order < MAX_ORDER && test_size < needed) {
+        uintptr_t buddy_addr = test_addr ^ test_size;
+        MallocMetadata* buddy_ptr = (MallocMetadata*)buddy_addr;
+
+        if (buddy_ptr->is_free == false || buddy_ptr->size != test_size) {
+            break;
+        }
+
+        test_addr = (test_addr < buddy_addr) ? test_addr : buddy_addr;
+        test_size = test_size * 2;
+        test_order++;
+    }
+
+    ///if test_size is bigger than new size we can merge and resize the block
+    if (test_size >= needed) {
+
+        uintptr_t real_addr = (uintptr_t)old_metadata;
+        size_t real_size = old_metadata->size;
+        int real_order = current_order;
+
+        while (real_size < needed) {
+            uintptr_t buddy_addr = real_addr ^ real_size;
+            MallocMetadata* buddy_ptr = (MallocMetadata*)buddy_addr;
+
+            ///we have to remove the buddy from the free list
+            if (buddy_ptr->prev != NULL) {
+                buddy_ptr->prev->next = buddy_ptr->next;
+            } else {
+                free_blocks[real_order] = buddy_ptr->next;
+            }
+            if (buddy_ptr->next != NULL) {
+                buddy_ptr->next->prev = buddy_ptr->prev;
+            }
+
+            real_addr = (real_addr < buddy_addr) ? real_addr : buddy_addr;
+            real_size = real_size * 2;
+            real_order++;
+            num_blocks--;
+        }
+
+        MallocMetadata* new_header = (MallocMetadata*)real_addr;
+
+        ///if the merged block's header ended up at a lower address than the
+        ///original old_metadata, the payload's position moved too
+        if (real_addr != (uintptr_t)old_metadata) {
+            std::memmove((void*)(new_header + 1), oldp, old_metadata->size - _size_meta_data());
+        }
+        new_header->size = real_size;
+        new_header->is_free = false;
+
+        return (void*)(new_header + 1);
+    }
+
+    ///if test failed and we couldnt merge the block with its buddies we have to allocate a new block and copy the data
+    void* newp = smalloc(size);
+    if (newp == NULL) {
+        return NULL;
+    }
+    std::memmove(newp, oldp, old_metadata->size - _size_meta_data());
+    sfree(oldp);
+    return newp;
+}
+
+}
+
+
+
+size_t _num_free_blocks() {
+    size_t count = 0;
+
+    for (int i = 0; i <= MAX_ORDER; i++) {
+        MallocMetadata* curr = free_blocks[i];
+        while (curr != NULL) {
+            count++;
+            curr = curr->next;
+        }
+    }
+    return count;
+}
+
+
+size_t _num_free_bytes() {
+    size_t total_bytes = 0;
+
+    for (int i = 0; i <= MAX_ORDER; i++) {
+        MallocMetadata* curr = free_blocks[i];
+        while (curr != NULL) {
+            total_bytes += (curr->size - _size_meta_data());
+            curr = curr->next;
+        }
+    }
+    return total_bytes;
+}
+
+size_t _num_allocated_blocks() {
+    return num_blocks + num_mmap_blocks;
+}
+
+///TODO: implement this function for Anwaar
+size_t _num_allocated_bytes() {
+    size_t total_heap_memory = NUM_INITIAL_BLOCKS * MAX_BLOCK_SIZE;
+    size_t total_metadata_bytes = num_blocks * _size_meta_data();
+    size_t buddy_allocated_bytes = total_heap_memory - total_metadata_bytes;
+
+    size_t mmap_allocated_bytes = 0;
+    MallocMetadata* curr = mmap_blocks;
+    while (curr != NULL) {
+        mmap_allocated_bytes += (curr->size - _size_meta_data());
+        curr = curr->next;
+    }
+
+    return buddy_allocated_bytes + mmap_allocated_bytes;
+}
+
+
+size_t _num_meta_data_bytes() {
+    return _num_allocated_blocks() * _size_meta_data();
+}
+
+
+size_t _size_meta_data() {
+    return sizeof(MallocMetadata);
+}
